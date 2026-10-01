@@ -47,6 +47,14 @@ If you come across any of these in search results, please <b>report them</b> as 
 
 </div>
 
+# Fork
+
+This fork contains several changes:
+1. Merged [PR 8181](https://github.com/OrcaSlicer/OrcaSlicer/pull/8181) that adds brick layer support (staggered wall)
+2. Merged [repo](https://github.com/Wasupmacuz/arc-overhang-prusaslicer-integration/) that adds arc (wave) overhangs support
+3. Dropped BambuLab network plugin in favor of [OBN](https://github.com/ClusterM/open-bamboo-networking)
+4. Removed all builds but ubuntu 24.04 (sorry guys)
+
 # Main features
 
 - **[Advanced Calibration Tools](https://www.orcaslicer.com/wiki/calibration_guide)**  
