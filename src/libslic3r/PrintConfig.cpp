@@ -1809,7 +1809,7 @@ void PrintConfigDef::init_fff_params()
 
     //BBS.
     def        = this->add("upward_compatible_machine", coStrings);
-    def->label = L("Upward compatible machine");
+    def->label = L("upward compatible machine");
     def->mode  = comAdvanced;
     def->set_default_value(new ConfigOptionStrings());
     def->cli   = ConfigOptionDef::nocli;
@@ -3300,7 +3300,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(true));
     
     def = this->add("accel_to_decel_factor", coPercent);
-    def->label = L("Accel_to_decel");
+    def->label = L("accel_to_decel");
     def->category = L("Speed");
     def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration.");
     def->sidetext = "%";
@@ -11197,14 +11197,14 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("mtcpp", coInt);
-    def->label = L("Mtcpp");
+    def->label = L("mtcpp");
     def->tooltip = L("max triangle count per plate for slicing.");
     def->cli = "mtcpp";
     def->cli_params = "count";
     def->set_default_value(new ConfigOptionInt(1000000));
 
     def = this->add("mstpp", coInt);
-    def->label = L("Mstpp");
+    def->label = L("mstpp");
     def->tooltip = L("max slicing time per plate in seconds.");
     def->cli = "mstpp";
     def->cli_params = "time";
