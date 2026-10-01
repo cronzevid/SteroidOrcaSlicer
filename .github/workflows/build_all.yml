@@ -49,9 +49,7 @@ jobs:
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ubuntu-24.04
-      arch: ""
       build-deps-only: ${{ inputs.build-deps-only || false }}
-    secrets: inherit
   unit_tests:
     name: Unit Tests
     runs-on: ubuntu-24.04
