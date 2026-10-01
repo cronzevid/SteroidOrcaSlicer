@@ -166,6 +166,11 @@ endif ()
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
 option(BUILD_TESTS       "Build unit tests" OFF)
 option(ORCA_TOOLS       "Build Orca tools" OFF)
+if (UNIX AND NOT APPLE)
+    option(ORCA_BUNDLE_OBN  "Build and bundle the Open Bamboo Networking plugin" ON)
+else ()
+    set(ORCA_BUNDLE_OBN OFF)
+endif ()
 
 if (FLATPAK)
     set(SLIC3R_FHS ON CACHE BOOL "" FORCE)
@@ -879,9 +884,45 @@ function(orcaslicer_copy_dlls target config postfix output_dlls)
 endfunction()
 
 
+
+if (ORCA_BUNDLE_OBN)
+    include(ExternalProject)
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/slic3r/Utils/bambu_networking.hpp" _orca_obn_version_line
+         REGEX "^#define BUNDLED_NETWORK_PLUGIN_VERSION ")
+    string(REGEX MATCH "\"([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)\"" _orca_obn_version_match "${_orca_obn_version_line}")
+    if (NOT CMAKE_MATCH_1)
+        message(FATAL_ERROR "Cannot parse BUNDLED_NETWORK_PLUGIN_VERSION from bambu_networking.hpp")
+    endif ()
+    set(ORCA_OBN_VERSION "${CMAKE_MATCH_1}")
+    set(ORCA_OBN_GIT_TAG "v2.2.0" CACHE STRING "open-bamboo-networking git tag")
+    set(ORCA_OBN_INSTALL_DIR "${CMAKE_BINARY_DIR}/obn/install")
+    ExternalProject_Add(orca_obn
+        GIT_REPOSITORY https://github.com/ClusterM/open-bamboo-networking.git
+        GIT_TAG ${ORCA_OBN_GIT_TAG}
+        GIT_SHALLOW ON
+        PREFIX "${CMAKE_BINARY_DIR}/obn"
+        INSTALL_DIR "${ORCA_OBN_INSTALL_DIR}"
+        CMAKE_GENERATOR Ninja
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            -DCMAKE_INSTALL_PREFIX=${ORCA_OBN_INSTALL_DIR}
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            -DOBN_CLIENT_TYPE=orca_slicer
+            -DOBN_VERSION=${ORCA_OBN_VERSION}
+            -DOBN_PATCH_CLIENT_CONF=OFF
+            -DOBN_RELEASE=ON
+        BUILD_ALWAYS OFF
+    )
+endif ()
+
 # libslic3r, OrcaSlicer GUI and the OrcaSlicer executable.
 add_subdirectory(deps_src)
 add_subdirectory(src)
+if (ORCA_BUNDLE_OBN)
+    add_dependencies(OrcaSlicer orca_obn)
+endif ()
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT OrcaSlicer_app_gui)
 
 add_dependencies(gettext_make_pot hintsToPot)

@@ -1207,91 +1207,9 @@ wxBoxSizer *PreferencesDialog::create_item_network_plugin_version(wxString title
 {
     wxBoxSizer *m_sizer = create_item_label(title, tooltip);
 
-    m_network_version_combo = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
-    m_network_version_combo->GetDropDown().SetUseContentWidth(true);
-    m_network_version_combo->SetToolTip(tooltip);
-
-    std::string current_version = app_config->get_network_plugin_version();
-    if (current_version.empty()) {
-        current_version = get_latest_network_version();
-    }
-    int current_selection = 0;
-
-    m_available_versions = get_all_available_versions();
-
-    for (size_t i = 0; i < m_available_versions.size(); i++) {
-        const auto& ver = m_available_versions[i];
-        wxString label;
-
-        if (!ver.suffix.empty()) {
-            label = wxString::FromUTF8("\xE2\x94\x94 ") + wxString::FromUTF8(ver.display_name);
-        } else {
-            label = wxString::FromUTF8(ver.display_name);
-        }
-
-        if (ver.is_latest) {
-            label += " " + _L("(Latest)");
-        }
-        m_network_version_combo->Append(label);
-        if (current_version == ver.version) {
-            current_selection = i;
-        }
-    }
-
-    m_network_version_combo->SetSelection(current_selection);
-    m_sizer->Add(m_network_version_combo, 0, wxALIGN_CENTER);
-
-    m_network_version_combo->GetDropDown().Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& e) {
-        int selection = e.GetSelection();
-        if (selection >= 0 && selection < (int)m_available_versions.size()) {
-            const auto& selected_ver = m_available_versions[selection];
-            std::string new_version = selected_ver.version;
-            std::string old_version = app_config->get_network_plugin_version();
-            if (old_version.empty()) {
-                old_version = get_latest_network_version();
-            }
-
-            app_config->set_network_plugin_version(new_version);
-            app_config->save();
-
-            if (new_version != old_version) {
-                BOOST_LOG_TRIVIAL(info) << "Network plugin version changed from " << old_version << " to " << new_version;
-
-                if (!selected_ver.warning.empty()) {
-                    MessageDialog warn_dlg(this, wxString::FromUTF8(selected_ver.warning), _L("Warning"), wxOK | wxCANCEL | wxICON_WARNING);
-                    if (warn_dlg.ShowModal() != wxID_OK) {
-                        app_config->set_network_plugin_version(old_version);
-                        app_config->save();
-                        e.Skip();
-                        return;
-                    }
-                }
-
-                // Check if the selected version already exists on disk
-                if (Slic3r::NetworkAgent::versioned_library_exists(new_version)) {
-                    BOOST_LOG_TRIVIAL(info) << "Version " << new_version << " already exists on disk, triggering hot reload";
-                    if (wxGetApp().hot_reload_network_plugin()) {
-                        MessageDialog dlg(this, _L("Network plug-in switched successfully."), _L("Success"), wxOK | wxICON_INFORMATION);
-                        dlg.ShowModal();
-                    } else {
-                        MessageDialog dlg(this, _L("Failed to load network plug-in. Please restart the application."), _L("Restart Required"), wxOK | wxICON_WARNING);
-                        dlg.ShowModal();
-                    }
-                } else {
-                    wxString msg = wxString::Format(
-                        _L("You've selected network plug-in version %s.\n\nWould you like to download and install this version now?\n\nNote: The application may need to restart after installation."),
-                        wxString::FromUTF8(new_version));
-
-                    MessageDialog dlg(this, msg, _L("Download Network Plug-in"), wxYES_NO | wxICON_QUESTION);
-                    if (dlg.ShowModal() == wxID_YES) {
-                        DownloadProgressDialog progress_dlg(_L("Downloading Network Plug-in"));
-                        progress_dlg.ShowModal();
-                    }
-                }
-            }
-        }
-        e.Skip();
-    });
+    auto version_text = new wxStaticText(m_parent, wxID_ANY, wxString::FromUTF8(BUNDLED_NETWORK_PLUGIN_VERSION " (Open Bamboo Networking)"));
+    version_text->SetToolTip(tooltip);
+    m_sizer->Add(version_text, 0, wxALIGN_CENTER);
 
     auto reload_btn = new Button(m_parent, wxEmptyString, "refresh", 0, 16);
     reload_btn->SetStyle(ButtonStyle::Regular, ButtonType::Icon);
@@ -1897,7 +1815,7 @@ void PreferencesDialog::create_items()
     auto item_enable_plugin    = create_item_checkbox(_L("Enable network plug-in"), "", "installed_networking");
     g_sizer->Add(item_enable_plugin);
 
-    auto item_plugin_version = create_item_network_plugin_version(_L("Network plug-in version"), _L("Select the network plug-in version to use"));
+    auto item_plugin_version = create_item_network_plugin_version(_L("Network plug-in version"), _L("Open Bamboo Networking plug-in bundled with this build"));
     g_sizer->Add(item_plugin_version);
 
     g_sizer->AddSpacer(FromDIP(10));

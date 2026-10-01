@@ -26,6 +26,7 @@ REQUIRED_DEV_PACKAGES=(
     openssl-devel
     perl-FindBin-Real
     texinfo
+    uthash-devel
     wayland-protocols-devel
     webkit2gtk4-devel
     wget

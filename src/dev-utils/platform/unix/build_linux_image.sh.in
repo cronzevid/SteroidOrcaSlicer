@@ -160,6 +160,12 @@ echo -n "[9/9] Generating Linux app..."
 
     cp -Rf ../resources "$APPDIR/resources"
 
+    OBN_PLUGIN_DIR="@ORCA_OBN_INSTALL_DIR@/plugins"
+    if [ -n "@ORCA_OBN_INSTALL_DIR@" ] && [ -d "$OBN_PLUGIN_DIR" ]; then
+        mkdir -p "$LIB_DIR/obn"
+        cp -fL "$OBN_PLUGIN_DIR"/*.so "$LIB_DIR/obn/"
+    fi
+
     ORIGINAL_BINARY_LOCATION=""
     if [ -f "src/${CONFIG}/@SLIC3R_APP_CMD@" ]; then
         ORIGINAL_BINARY_LOCATION="$(realpath "src/${CONFIG}/@SLIC3R_APP_CMD@")"

@@ -22,6 +22,7 @@ export REQUIRED_DEV_PACKAGES=(
     ninja
     openssl
     texinfo
+    uthash
     wayland-protocols
     webkit2gtk
     wget

@@ -1148,450 +1148,148 @@ std::string GUI_App::get_model_http_url(std::string country_code)
 }
 
 
-std::string GUI_App::get_plugin_url(std::string name, std::string country_code)
+static boost::filesystem::path bundled_network_plugin_dir()
 {
-    std::string url = get_http_url(country_code);
-
-    std::string curr_version;
-    if (use_legacy_network_plugin()) {
-        curr_version = BAMBU_NETWORK_AGENT_VERSION_LEGACY;
-    } else if (name == "plugins" && app_config) {
-        std::string user_version = app_config->get_network_plugin_version();
-        curr_version = user_version.empty() ? get_latest_network_version() : user_version;
-    } else {
-        curr_version = get_latest_network_version();
-    }
-
-    std::string using_version = curr_version.substr(0, 9) + "00";
-    if (name == "cameratools")
-        using_version = curr_version.substr(0, 6) + "00.00";
-    url += (boost::format("?slicer/%1%/cloud=%2%") % name % using_version).str();
-    return url;
+    return boost::filesystem::path(resources_dir()).parent_path() / "lib" / "obn";
 }
 
-static std::string decode(std::string const& extra, std::string const& path = {}) {
-    char const* p = extra.data();
-    char const* e = p + extra.length();
-    while (p + 4 < e) {
-        boost::uint16_t len = ((boost::uint16_t)p[2]) | ((boost::uint16_t)p[3] << 8);
-        if (p[0] == '\x75' && p[1] == '\x70' && len >= 5 && p + 4 + len < e && p[4] == '\x01') {
-            return std::string(p + 9, p + 4 + len);
+static std::string network_plugin_library_extension()
+{
+#if defined(_MSC_VER) || defined(_WIN32)
+    return ".dll";
+#elif defined(__WXMAC__)
+    return ".dylib";
+#else
+    return ".so";
+#endif
+}
+
+static std::string network_plugin_library_prefix()
+{
+#if defined(_MSC_VER) || defined(_WIN32)
+    return "";
+#else
+    return "lib";
+#endif
+}
+
+static bool files_have_same_content(const boost::filesystem::path &a, const boost::filesystem::path &b)
+{
+    boost::system::error_code ec;
+    if (boost::filesystem::file_size(a, ec) != boost::filesystem::file_size(b, ec) || ec)
+        return false;
+    boost::nowide::ifstream fa(a.string(), std::ios::binary);
+    boost::nowide::ifstream fb(b.string(), std::ios::binary);
+    if (!fa || !fb)
+        return false;
+    return std::equal(std::istreambuf_iterator<char>(fa), std::istreambuf_iterator<char>(), std::istreambuf_iterator<char>(fb));
+}
+
+static bool install_file_atomically(const boost::filesystem::path &src, const boost::filesystem::path &dst)
+{
+    namespace bfs = boost::filesystem;
+    boost::system::error_code ec;
+    if (bfs::exists(dst, ec) && files_have_same_content(src, dst))
+        return true;
+
+    bfs::path tmp = dst;
+    tmp += ".tmp";
+    bfs::remove(tmp, ec);
+    bfs::copy_file(src, tmp, bfs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        BOOST_LOG_TRIVIAL(error) << "[install_bundled_network_plugin] copy " << src.string() << " -> " << tmp.string() << " failed: " << ec.message();
+        return false;
+    }
+    bfs::permissions(tmp, bfs::owner_read | bfs::owner_write | bfs::owner_exe | bfs::group_read | bfs::group_exe | bfs::others_read | bfs::others_exe, ec);
+    bfs::rename(tmp, dst, ec);
+    if (ec) {
+        BOOST_LOG_TRIVIAL(error) << "[install_bundled_network_plugin] rename " << tmp.string() << " -> " << dst.string() << " failed: " << ec.message();
+        bfs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+bool GUI_App::install_bundled_network_plugin(bool enable)
+{
+    namespace bfs = boost::filesystem;
+
+    const std::string version     = BUNDLED_NETWORK_PLUGIN_VERSION;
+    const std::string ext         = network_plugin_library_extension();
+    const std::string prefix      = network_plugin_library_prefix();
+    const std::string network_lib = prefix + BAMBU_NETWORK_LIBRARY + "_" + version + ext;
+
+    const bfs::path src_dir       = bundled_network_plugin_dir();
+    const bfs::path plugin_folder = bfs::path(data_dir()) / "plugins";
+
+    boost::system::error_code ec;
+    bfs::create_directories(plugin_folder, ec);
+
+    const std::vector<std::string> files = {network_lib, prefix + "BambuSource" + ext, prefix + "live555" + ext};
+    for (const std::string &name : files) {
+        const bfs::path src = src_dir / name;
+        if (!bfs::exists(src, ec)) {
+            BOOST_LOG_TRIVIAL(error) << "[install_bundled_network_plugin] bundled file is missing: " << src.string();
+            return false;
         }
-        else {
-            p += 4 + len;
+        if (!install_file_atomically(src, plugin_folder / name))
+            return false;
+    }
+
+    const std::string versioned_prefix = prefix + BAMBU_NETWORK_LIBRARY + "_";
+    for (bfs::directory_iterator it(plugin_folder, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string filename = it->path().filename().string();
+        if (filename != network_lib && boost::starts_with(filename, versioned_prefix) && it->path().extension() == ext) {
+            boost::system::error_code rm_ec;
+            bfs::remove(it->path(), rm_ec);
         }
     }
-    return Slic3r::decode_path(path.c_str());
+    {
+        boost::system::error_code rm_ec;
+        bfs::remove(plugin_folder / (prefix + BAMBU_NETWORK_LIBRARY + ext), rm_ec);
+        bfs::remove_all(plugin_folder / "backup", rm_ec);
+    }
+
+    if (app_config) {
+        app_config->set_network_plugin_version(version);
+        app_config->set("update_network_plugin", "false");
+        app_config->set_network_update_prompt_disabled(true);
+        if (enable)
+            app_config->set_bool("installed_networking", true);
+        app_config->save();
+    }
+    BOOST_LOG_TRIVIAL(info) << "[install_bundled_network_plugin] installed " << network_lib << " from " << src_dir.string();
+    return true;
 }
 
 int GUI_App::download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
-    int result = 0;
-    json j;
-    std::string err_msg;
-
-    // get country_code
-    AppConfig* app_config = wxGetApp().app_config;
-    if (!app_config) {
-        j["result"] = "failed";
-        j["error_msg"] = "app_config is nullptr";
-        return -1;
-    }
-
-    BOOST_LOG_TRIVIAL(info) << "[download_plugin]: enter";
-    m_networking_cancel_update = false;
-    // get temp path
-    fs::path target_file_path = (fs::temp_directory_path() / package_name);
-    fs::path tmp_path = target_file_path;
-    tmp_path += format(".%1%%2%", get_current_pid(), ".tmp");
-
-    // Determine OS type for plugin download (must be set per-request since global
-    // extra headers are no longer initialised on this branch).
-#if defined(__WINDOWS__)
-    std::string os_type = (is_running_on_arm64() && !use_legacy_network_plugin()) ? "windows_arm" : "windows";
-#elif defined(__APPLE__)
-    std::string os_type = "macos";
-#elif defined(__linux__)
-    std::string os_type = "linux";
-#else
-    std::string os_type = "windows";
-#endif
-
-    // get_url
-    std::string  url = get_plugin_url(name, app_config->get_country_code());
-    std::string download_url;
-    Slic3r::Http http_url = Slic3r::Http::get(url);
-    BOOST_LOG_TRIVIAL(info) << "[download_plugin]: check the plugin from " << url;
-    http_url.timeout_connect(TIMEOUT_CONNECT)
-        .timeout_max(TIMEOUT_RESPONSE)
-        .header("X-BBL-OS-Type", os_type)
-        .on_complete(
-        [&download_url](std::string body, unsigned status) {
-            try {
-                json j = json::parse(body);
-                std::string message = j["message"].get<std::string>();
-
-                if (message == "success") {
-                    json resource = j.at("resources");
-                    if (resource.is_array()) {
-                        for (auto iter = resource.begin(); iter != resource.end(); iter++) {
-                            Semver version;
-                            std::string url;
-                            std::string type;
-                            std::string vendor;
-                            std::string description;
-                            for (auto sub_iter = iter.value().begin(); sub_iter != iter.value().end(); sub_iter++) {
-                                if (boost::iequals(sub_iter.key(), "type")) {
-                                    type = sub_iter.value();
-                                    BOOST_LOG_TRIVIAL(info) << "[download_plugin]: get version of settings's type, " << sub_iter.value();
-                                }
-                                else if (boost::iequals(sub_iter.key(), "version")) {
-                                    version = *(Semver::parse(sub_iter.value()));
-                                }
-                                else if (boost::iequals(sub_iter.key(), "description")) {
-                                    description = sub_iter.value();
-                                }
-                                else if (boost::iequals(sub_iter.key(), "url")) {
-                                    url = sub_iter.value();
-                                }
-                            }
-                            BOOST_LOG_TRIVIAL(info) << "[download_plugin 1]: get type " << type << ", version " << version.to_string() << ", url " << url;
-                            download_url = url;
-                        }
-                    }
-                }
-                else {
-                    BOOST_LOG_TRIVIAL(info) << "[download_plugin 1]: get version of plugin failed, body=" << body;
-                }
-            }
-            catch (...) {
-                BOOST_LOG_TRIVIAL(error) << "[download_plugin 1]: catch unknown exception";
-                ;
-            }
-        }).on_error(
-            [&result, &err_msg](std::string body, std::string error, unsigned int status) {
-                BOOST_LOG_TRIVIAL(error) << "[download_plugin 1] on_error: " << error<<", body = " << body;
-                err_msg += "[download_plugin 1] on_error: " + error + ", body = " + body;
-                result = -1;
-        }).perform_sync();
-
     bool cancel = false;
-    if (result < 0) {
-        j["result"] = "failed";
-        j["error_msg"] = err_msg;
-        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
-        return result;
-    }
-
-
-    if (download_url.empty()) {
-        BOOST_LOG_TRIVIAL(info) << "[download_plugin 1]: no available plugin found for this app version: " << SLIC3R_VERSION;
-        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
-        j["result"] = "failed";
-        j["error_msg"] = "[download_plugin 1]: no available plugin found for this app version: " + std::string(SLIC3R_VERSION);
+    if (name != "plugins") {
+        BOOST_LOG_TRIVIAL(warning) << "[download_plugin] downloading '" << name << "' is not supported";
+        if (pro_fn)
+            pro_fn(InstallStatusDownloadFailed, 0, cancel);
         return -1;
     }
-    else if (pro_fn) {
-        pro_fn(InstallStatusNormal, 5, cancel);
-    }
-
-    if (m_networking_cancel_update || cancel) {
-        BOOST_LOG_TRIVIAL(info) << boost::format("[download_plugin 1]: %1%, cancelled by user") % __LINE__;
-        j["result"] = "failed";
-        j["error_msg"] = (boost::format("[download_plugin 1]: %1%, cancelled by user") % __LINE__).str();
-        return -1;
-    }
-    BOOST_LOG_TRIVIAL(info) << "[download_plugin] get_url = " << download_url;
-
-    // download
-    Slic3r::Http http = Slic3r::Http::get(download_url);
-    int reported_percent = 0;
-    http.header("X-BBL-OS-Type", os_type)
-        .on_progress(
-        [this, &pro_fn, cancel_fn, &result, &reported_percent, &err_msg](Slic3r::Http::Progress progress, bool& cancel) {
-            int percent = 0;
-            if (progress.dltotal != 0)
-                percent = progress.dlnow * 50 / progress.dltotal;
-            bool was_cancel = false;
-            if (pro_fn && ((percent - reported_percent) >= 10)) {
-                pro_fn(InstallStatusNormal, percent, was_cancel);
-                reported_percent = percent;
-                BOOST_LOG_TRIVIAL(info) << "[download_plugin 2] progress: " << reported_percent;
-            }
-            cancel = m_networking_cancel_update || was_cancel;
-            if (cancel_fn)
-                if (cancel_fn())
-                    cancel = true;
-
-            if (cancel) {
-                err_msg += "[download_plugin] cancel";
-                result = -1;
-            }
-        })
-        .on_complete([&pro_fn, tmp_path, target_file_path](std::string body, unsigned status) {
-            BOOST_LOG_TRIVIAL(info) << "[download_plugin 2] completed";
-            bool cancel = false;
-            int percent = 0;
-            fs::fstream file(tmp_path, std::ios::out | std::ios::binary | std::ios::trunc);
-            file.write(body.c_str(), body.size());
-            file.close();
-            fs::rename(tmp_path, target_file_path);
-            if (pro_fn) pro_fn(InstallStatusDownloadCompleted, 80, cancel);
-            })
-        .on_error([&pro_fn, &result, &err_msg](std::string body, std::string error, unsigned int status) {
-            bool cancel = false;
-            if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
-            BOOST_LOG_TRIVIAL(error) << "[download_plugin 2] on_error: " << error<<", body = " << body;
-            err_msg += "[download_plugin 2] on_error: " + error + ", body = " + body;
-            result = -1;
-        });
-    http.perform_sync();
-    j["result"] = result < 0 ? "failed" : "success";
-    j["error_msg"] = err_msg;
-    return result;
+    if (pro_fn)
+        pro_fn(InstallStatusDownloadCompleted, 80, cancel);
+    return 0;
 }
 
 int GUI_App::install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
     bool cancel = false;
-    std::string target_file_path = (fs::temp_directory_path() / package_name).string();
-
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] enter";
-    // get plugin folder
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / name;
-    //auto plugin_folder = boost::filesystem::path(wxStandardPaths::Get().GetUserDataDir().ToUTF8().data()) / "plugins";
-    auto backup_folder = plugin_folder/"backup";
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info) << "[install_plugin] will create directory "<<plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    if (!boost::filesystem::exists(backup_folder)) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", will create directory %1%")%backup_folder.string();
-        boost::filesystem::create_directory(backup_folder);
-    }
-
-    if (m_networking_cancel_update) {
-        BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
+    if (name != "plugins")
         return -1;
-    }
-    if (pro_fn) {
+    if (pro_fn)
         pro_fn(InstallStatusNormal, 50, cancel);
-    }
-    // unzip
-    mz_zip_archive archive;
-    mz_zip_zero_struct(&archive);
-    if (!open_zip_reader(&archive, target_file_path)) {
-        BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, open zip file failed")%__LINE__;
-        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
+    if (!install_bundled_network_plugin(true)) {
+        if (pro_fn)
+            pro_fn(InstallStatusUnzipFailed, 0, cancel);
         return InstallStatusUnzipFailed;
     }
-
-    boost::filesystem::path legacy_lib_path, legacy_lib_backup;
-    bool had_existing_legacy = false;
-    if (name == "plugins") {
-#if defined(_MSC_VER) || defined(_WIN32)
-        legacy_lib_path = plugin_folder / (std::string(BAMBU_NETWORK_LIBRARY) + ".dll");
-#elif defined(__WXMAC__)
-        legacy_lib_path = plugin_folder / (std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + ".dylib");
-#else
-        legacy_lib_path = plugin_folder / (std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + ".so");
-#endif
-        legacy_lib_backup = legacy_lib_path;
-        legacy_lib_backup += ".backup";
-
-        if (boost::filesystem::exists(legacy_lib_path)) {
-            had_existing_legacy = true;
-            boost::system::error_code ec;
-            boost::filesystem::rename(legacy_lib_path, legacy_lib_backup, ec);
-            if (ec) {
-                BOOST_LOG_TRIVIAL(warning) << "[install_plugin] failed to backup existing legacy library: " << ec.message();
-                had_existing_legacy = false;
-            } else {
-                BOOST_LOG_TRIVIAL(info) << "[install_plugin] backed up existing legacy library";
-            }
-        }
-    }
-
-    mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
-    mz_zip_archive_file_stat stat;
-    BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, got %2% files")%__LINE__ %num_entries;
-    for (mz_uint i = 0; i < num_entries; i++) {
-        if (m_networking_cancel_update || cancel) {
-            BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-            return -1;
-        }
-        if (mz_zip_reader_file_stat(&archive, i, &stat)) {
-            if (stat.m_uncomp_size > 0) {
-                std::string dest_file;
-                if (stat.m_is_utf8) {
-                    dest_file = stat.m_filename;
-                }
-                else {
-                    std::string extra(1024, 0);
-                    size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
-                    dest_file = decode(extra.substr(0, n), stat.m_filename);
-                }
-                auto dest_path = plugin_folder / dest_file;
-                boost::filesystem::create_directories(dest_path.parent_path());
-                std::string dest_zip_file = encode_path(dest_path.string().c_str());
-                try {
-                    if (fs::exists(dest_path)) {
-                        boost::system::error_code ec;
-                        fs::remove(dest_path, ec);
-                        if (ec) {
-                            // On Windows a currently-loaded DLL (e.g. BambuSource.dll, or the
-                            // networking library in legacy mode) cannot be deleted or overwritten
-                            // in place, which failed the whole install with "The plug-in file may
-                            // be in use" (issue #14373). It CAN however be renamed aside: the
-                            // running module keeps mapping the renamed file while we write the new
-                            // one. The stale ".old" copy is cleared on the next install/launch.
-                            boost::filesystem::path aside = dest_path;
-                            aside += ".old";
-                            boost::system::error_code ec2;
-                            fs::remove(aside, ec2);
-                            fs::rename(dest_path, aside, ec2);
-                            if (ec2) {
-                                close_zip_reader(&archive);
-                                BOOST_LOG_TRIVIAL(error) << "[install_plugin] cannot replace in-use file "
-                                                         << dest_path.string() << ": " << ec2.message();
-                                if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-                                return InstallStatusUnzipFailed;
-                            }
-                            BOOST_LOG_TRIVIAL(warning) << "[install_plugin] " << dest_path.filename().string()
-                                                       << " was in use, renamed aside to .old";
-                        }
-                    }
-                    mz_bool res = 0;
-#ifndef WIN32
-                    if (S_ISLNK(stat.m_external_attr >> 16)) {
-                        std::string link(stat.m_uncomp_size + 1, 0);
-                        res = mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, link.data(), stat.m_uncomp_size, 0);
-                        try {
-                            boost::filesystem::create_symlink(link, dest_path);
-                        } catch (const std::exception &e) {
-                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " create_symlink:" << e.what();
-                        }
-                    } else {
-#endif
-                        res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, dest_zip_file.c_str(), 0);
-#ifndef WIN32
-                    }
-#endif
-                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from plugin zip %2%\n") % dest_file % stat.m_filename;
-                    if (res == 0) {
-#ifdef WIN32
-                        std::wstring new_dest_zip_file = boost::locale::conv::utf_to_utf<wchar_t>(dest_path.generic_string());
-                        res                            = mz_zip_reader_extract_to_file_w(&archive, stat.m_file_index, new_dest_zip_file.c_str(), 0);
-#endif
-                        if (res == 0) {
-                            mz_zip_error zip_error = mz_zip_get_last_error(&archive);
-                            BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read error:" << mz_zip_get_error_string(zip_error) << std::endl;
-                            close_zip_reader(&archive);
-                            if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-                            return InstallStatusUnzipFailed;
-                        }
-                    }
-                }
-                catch (const std::exception& e)
-                {
-                    // ensure the zip archive is closed and rethrow the exception
-                    close_zip_reader(&archive);
-                    BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read exception:"<<e.what();
-                    if (pro_fn) {
-                        pro_fn(InstallStatusUnzipFailed, 0, cancel);
-                    }
-                    return InstallStatusUnzipFailed;
-                }
-            }
-        }
-        else {
-            BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, mz_zip_reader_file_stat for file %2% failed")%__LINE__%i;
-        }
-    }
-
-    close_zip_reader(&archive);
-
-    if (name == "plugins") {
-        std::string config_version = app_config->get_network_plugin_version();
-        if (config_version.empty()) {
-            config_version = get_latest_network_version();
-            BOOST_LOG_TRIVIAL(info) << "[install_plugin] config_version was empty, using latest: " << config_version;
-            app_config->set_network_plugin_version(config_version);
-            GUI::wxGetApp().CallAfter([this] {
-                if (app_config)
-                    app_config->save();
-            });
-        }
-        if (!config_version.empty() && boost::filesystem::exists(legacy_lib_path)) {
-#if defined(_MSC_VER) || defined(_WIN32)
-            auto versioned_lib = plugin_folder / (std::string(BAMBU_NETWORK_LIBRARY) + "_" + config_version + ".dll");
-#elif defined(__WXMAC__)
-            auto versioned_lib = plugin_folder / (std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + "_" + config_version + ".dylib");
-#else
-            auto versioned_lib = plugin_folder / (std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + "_" + config_version + ".so");
-#endif
-            BOOST_LOG_TRIVIAL(info) << "[install_plugin] renaming newly extracted " << legacy_lib_path.string() << " to " << versioned_lib.string();
-            boost::system::error_code ec;
-            if (boost::filesystem::exists(versioned_lib)) {
-                boost::filesystem::remove(versioned_lib, ec);
-            }
-            boost::filesystem::rename(legacy_lib_path, versioned_lib, ec);
-            if (ec) {
-                BOOST_LOG_TRIVIAL(error) << "[install_plugin] failed to rename to versioned: " << ec.message();
-            }
-        }
-
-        if (had_existing_legacy && boost::filesystem::exists(legacy_lib_backup)) {
-            BOOST_LOG_TRIVIAL(info) << "[install_plugin] restoring backed up legacy library";
-            boost::system::error_code ec;
-            boost::filesystem::rename(legacy_lib_backup, legacy_lib_path, ec);
-            if (ec) {
-                BOOST_LOG_TRIVIAL(warning) << "[install_plugin] failed to restore legacy library backup: " << ec.message();
-            }
-        }
-    }
-
-    {
-        fs::path dir_path(plugin_folder);
-        if (fs::exists(dir_path) && fs::is_directory(dir_path)) {
-            int file_count = 0, file_index = 0;
-            for (fs::directory_iterator it(dir_path); it != fs::directory_iterator(); ++it) {
-                if (fs::is_regular_file(it->status())) { ++file_count; }
-            }
-            for (fs::directory_iterator it(dir_path); it != fs::directory_iterator(); ++it) {
-                BOOST_LOG_TRIVIAL(info) << " current path:" << it->path().string();
-                if (it->path().string() == backup_folder) {
-                    continue;
-                }
-                auto dest_path = backup_folder.string() + "/" + it->path().filename().string();
-                if (fs::is_regular_file(it->status())) {
-                    BOOST_LOG_TRIVIAL(info) << " copy file:" << it->path().string() << "," << it->path().filename();
-                    try {
-                        if (pro_fn) { pro_fn(InstallStatusNormal, 50 + file_index / file_count, cancel); }
-                        file_index++;
-                        if (fs::exists(dest_path)) { fs::remove(dest_path); }
-                        std::string    error_message;
-                        CopyFileResult cfr = copy_file(it->path().string(), dest_path, error_message, false);
-                        if (cfr != CopyFileResult::SUCCESS) { BOOST_LOG_TRIVIAL(error) << "Copying to backup failed(" << cfr << "): " << error_message; }
-                    } catch (const std::exception &e) {
-                        BOOST_LOG_TRIVIAL(error) << "Copying to backup failed: " << e.what();
-                    }
-                } else {
-                    BOOST_LOG_TRIVIAL(info) << " copy framework:" << it->path().string() << "," << it->path().filename();
-                    copy_framework(it->path().string(), dest_path);
-                }
-            }
-        }
-    }
-
-
     if (pro_fn)
         pro_fn(InstallStatusInstallCompleted, 100, cancel);
-    if (name == "plugins")
-        app_config->set_bool("installed_networking", true);
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] success";
     return 0;
 }
 
@@ -1815,69 +1513,21 @@ std::string GUI_App::get_latest_network_version() const
 
 bool GUI_App::has_network_update_available() const
 {
-    std::string current = Slic3r::NetworkAgent::get_version();
-    std::string latest = get_latest_network_version();
-
-    if (current.empty() || current == "00.00.00.00")
-        return false;
-
-    return current.substr(0, 8) != latest.substr(0, 8);
+    return false;
 }
 
 void GUI_App::show_network_plugin_download_dialog(bool is_update)
 {
+    if (is_update)
+        return;
+
+    wxString message = _L("The bundled Open Bamboo Networking plug-in could not be loaded. Network related features are unavailable.");
     auto load_error = Slic3r::NetworkAgent::get_load_error();
+    if (load_error.has_error && !load_error.message.empty())
+        message += "\n\n" + from_u8(load_error.message);
 
-    NetworkPluginDownloadDialog::Mode mode;
-    if (load_error.has_error) {
-        mode = NetworkPluginDownloadDialog::Mode::CorruptedPlugin;
-    } else if (is_update) {
-        mode = NetworkPluginDownloadDialog::Mode::UpdateAvailable;
-    } else {
-        mode = NetworkPluginDownloadDialog::Mode::MissingPlugin;
-    }
-
-    std::string current_version = Slic3r::NetworkAgent::get_version();
-
-    NetworkPluginDownloadDialog dlg(mainframe, mode, current_version,
-        load_error.message, load_error.technical_details);
-
-    int result = dlg.ShowModal();
-
-    switch (result) {
-    case NetworkPluginDownloadDialog::RESULT_DOWNLOAD:
-        {
-            std::string selected = dlg.get_selected_version();
-            app_config->set_network_plugin_version(selected);
-            app_config->save();
-
-            DownloadProgressDialog download_dlg(_L("Downloading Network Plug-in"));
-            download_dlg.ShowModal();
-        }
-        break;
-
-    case NetworkPluginDownloadDialog::RESULT_REMIND_LATER:
-        app_config->set_remind_network_update_later(true);
-        app_config->save();
-        break;
-
-    case NetworkPluginDownloadDialog::RESULT_SKIP_VERSION:
-        {
-            std::string latest = get_latest_network_version();
-            app_config->add_skipped_network_version(latest);
-            app_config->save();
-        }
-        break;
-
-    case NetworkPluginDownloadDialog::RESULT_DONT_ASK:
-        app_config->set_network_update_prompt_disabled(true);
-        app_config->save();
-        break;
-
-    case NetworkPluginDownloadDialog::RESULT_SKIP:
-    default:
-        break;
-    }
+    MessageDialog dlg(mainframe, message, _L("Network plug-in"), wxOK | wxICON_ERROR);
+    dlg.ShowModal();
 }
 
 void GUI_App::remove_old_networking_plugins()
@@ -3049,7 +2699,6 @@ bool GUI_App::on_init_inner()
             wxMessageBox("Force using legacy bambu networking plugin because debugger is attached! If the app terminates itself immediately, please delete installed plugin and try again!");
         }
     } */
-    copy_network_if_available();
     on_init_network();
 
     if (m_agent && m_agent->is_user_login()) {
@@ -3240,115 +2889,11 @@ bool GUI_App::on_init_inner()
     return true;
 }
 
-void GUI_App::copy_network_if_available()
-{
-    if (app_config->get("update_network_plugin") != "true")
-        return;
-
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / "plugins";
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-
-    std::string cached_version;
-    if (boost::filesystem::exists(changelog_file)) {
-        try {
-            boost::nowide::ifstream ifs(changelog_file);
-            json j;
-            ifs >> j;
-            if (j.contains("version"))
-                cached_version = j["version"];
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": cached_version = " << cached_version;
-        } catch (nlohmann::detail::parse_error& err) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": parse " << changelog_file << " failed: " << err.what();
-        }
-    }
-
-    if (cached_version.empty()) {
-        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": no version found in changelog, aborting copy";
-        app_config->set("update_network_plugin", "false");
-        return;
-    }
-
-    std::string network_library, player_library, live555_library, network_library_dst, player_library_dst, live555_library_dst;
-#if defined(_MSC_VER) || defined(_WIN32)
-    network_library = cache_folder.string() + "/bambu_networking.dll";
-    player_library = cache_folder.string() + "/BambuSource.dll";
-    live555_library = cache_folder.string() + "/live555.dll";
-    network_library_dst = plugin_folder.string() + "/" + std::string(BAMBU_NETWORK_LIBRARY) + "_" + cached_version + ".dll";
-    player_library_dst = plugin_folder.string() + "/BambuSource.dll";
-    live555_library_dst = plugin_folder.string() + "/live555.dll";
-#elif defined(__WXMAC__)
-    network_library = cache_folder.string() + "/libbambu_networking.dylib";
-    player_library = cache_folder.string() + "/libBambuSource.dylib";
-    live555_library = cache_folder.string() + "/liblive555.dylib";
-    network_library_dst = plugin_folder.string() + "/lib" + std::string(BAMBU_NETWORK_LIBRARY) + "_" + cached_version + ".dylib";
-    player_library_dst = plugin_folder.string() + "/libBambuSource.dylib";
-    live555_library_dst = plugin_folder.string() + "/liblive555.dylib";
-#else
-    network_library = cache_folder.string() + "/libbambu_networking.so";
-    player_library = cache_folder.string() + "/libBambuSource.so";
-    live555_library = cache_folder.string() + "/liblive555.so";
-    network_library_dst = plugin_folder.string() + "/lib" + std::string(BAMBU_NETWORK_LIBRARY) + "_" + cached_version + ".so";
-    player_library_dst = plugin_folder.string() + "/libBambuSource.so";
-    live555_library_dst = plugin_folder.string() + "/liblive555.so";
-#endif
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": checking network_library " << network_library << ", player_library " << player_library;
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": create directory " << plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    std::string error_message;
-    if (boost::filesystem::exists(network_library)) {
-        CopyFileResult cfr = copy_file(network_library, network_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(network_library_dst, perms);
-        fs::remove(network_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Copying network library from " << network_library << " to " << network_library_dst << " successfully.";
-
-        app_config->set_network_plugin_version(cached_version);
-        app_config->save();
-    }
-
-    if (boost::filesystem::exists(player_library)) {
-        CopyFileResult cfr = copy_file(player_library, player_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(player_library_dst, perms);
-        fs::remove(player_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Copying player library from " << player_library << " to " << player_library_dst << " successfully.";
-    }
-
-    if (boost::filesystem::exists(live555_library)) {
-        CopyFileResult cfr = copy_file(live555_library, live555_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(live555_library_dst, perms);
-        fs::remove(live555_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Copying live555 library from " << live555_library << " to " << live555_library_dst << " successfully.";
-    }
-    if (boost::filesystem::exists(changelog_file))
-        fs::remove(changelog_file);
-    app_config->set("update_network_plugin", "false");
-}
-
 bool GUI_App::on_init_network(bool try_backup)
 {
+    if (!install_bundled_network_plugin(app_config->get_network_plugin_version() != BUNDLED_NETWORK_PLUGIN_VERSION))
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": failed to install the bundled network plug-in";
+
     // Clean up stale ".old" files left by install_plugin() when it had to rename an in-use
     // DLL aside (see the rename-aside path in install_plugin). This runs before the plug-in
     // is (re)loaded - at startup nothing is mapped yet, and on a hot reload the previous
@@ -3522,24 +3067,6 @@ bool GUI_App::on_init_network(bool try_backup)
 
         if (!m_user_manager)
             m_user_manager = new Slic3r::UserManager();
-    }
-
-    if (should_load_networking_plugin && m_networking_compatible && !use_legacy_network_plugin()) {
-        app_config->clear_remind_network_update_later();
-
-        if (has_network_update_available()) {
-            std::string latest = get_latest_network_version();
-
-            bool should_prompt = !app_config->is_network_update_prompt_disabled()
-                && !app_config->is_network_version_skipped(latest)
-                && !app_config->should_remind_network_update_later();
-
-            if (should_prompt) {
-                CallAfter([this]() {
-                    show_network_plugin_download_dialog(true);
-                });
-            }
-        }
     }
 
     return true;
