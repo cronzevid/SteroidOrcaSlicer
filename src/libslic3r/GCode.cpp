@@ -6535,7 +6535,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
 
     const auto get_sloped_z = [&sloped, this](double z_ratio) {
         const auto height = sloped->height;
-        return lerp(m_nominal_z - height, m_nominal_z, z_ratio);
+        const auto z_offset = sloped->z_offset;
+        return lerp(m_nominal_z + z_offset * height - height, m_nominal_z + z_offset * height, z_ratio);
     };
 
     bool slope_need_z_travel = false;
@@ -6547,6 +6548,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
     Point first_point = path.first_point();
+    const double path_base_z = m_nominal_z + path.z_offset * path.height;
     if (!m_last_pos_defined || m_last_pos.to_point() != first_point || m_need_change_layer_lift_z || slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
 
@@ -6555,6 +6557,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             z =  get_sloped_z(sloped->slope_begin.z_ratio);
         } else if (path.z_contoured && !path.polyline.lines().empty()) {
             z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
+        } else if (path.z_offset != 0) {
+            z = path_base_z;
         }
 
         gcode += this->travel_to(first_point, path.role(), "move to first " + description + " point", z);
@@ -6563,7 +6567,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
             const std::string z_sync_comment = _last_pos_undefined ?
                 "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
-            gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
+            gcode += this->writer().travel_to_z(sloped == nullptr ? path_base_z : m_nominal_z, z_sync_comment, true);
         }
         m_need_change_layer_lift_z = false;
     }
@@ -6577,8 +6581,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     }
     if (!path.z_contoured && sloped == nullptr) {
         double current_z = m_writer.get_position().z();
-        if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z)) {
-            gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after contouring", true);
+        if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(path_base_z)) {
+            gcode += this->writer().travel_to_z(path_base_z, "reset Z after contouring", true);
         }
     }
 
@@ -6649,7 +6653,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     // calculate effective extrusion length per distance unit (e_per_mm)
     double filament_flow_ratio = FILAMENT_CONFIG(filament_flow_ratio);
     // We set _mm3_per_mm to effectove flow = Geometric volume * print flow ratio * filament flow ratio * role-based-flow-ratios
-    auto _mm3_per_mm = path.mm3_per_mm * this->config().print_flow_ratio;
+    auto _mm3_per_mm = path.mm3_per_mm * path.extrusion_multiplier * this->config().print_flow_ratio;
     _mm3_per_mm *= filament_flow_ratio;
 
     if (path.role() == erTopSolidInfill) {
