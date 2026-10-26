@@ -54,6 +54,7 @@ This fork contains several changes:
 2. Merged [repo](https://github.com/Wasupmacuz/arc-overhang-prusaslicer-integration/) that adds arc (wave) overhangs support
 3. Dropped BambuLab network plugin in favor of [OBN](https://github.com/ClusterM/open-bamboo-networking)
 4. Removed all builds but ubuntu 24.04 (sorry guys)
+5. Merged [PR 14125](https://github.com/OrcaSlicer/OrcaSlicer/pull/14125) that adds H2D/X2D mixed nozzle size printing
 
 # Main features
 
